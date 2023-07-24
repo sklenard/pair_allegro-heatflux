@@ -28,26 +28,32 @@ PairStyle(allegro,PairAllegro)
 namespace LAMMPS_NS {
 
 class PairAllegro : public Pair {
- public:
-  PairAllegro(class LAMMPS *);
-  virtual ~PairAllegro();
-  virtual void compute(int, int);
-  void settings(int, char **);
-  virtual void coeff(int, char **);
-  virtual double init_one(int, int);
-  virtual void init_style();
-  void allocate();
+public:
+   PairAllegro(class LAMMPS *);
+   virtual ~PairAllegro();
+   virtual void compute(int, int);
+   void settings(int, char **);
+   virtual void coeff(int, char **);
+   virtual double init_one(int, int);
+   virtual void init_style();
+   void allocate();
 
-  double cutoff;
-  torch::jit::Module model;
-  torch::Device device = torch::kCPU;
-  std::vector<int> type_mapper;
+   double cutoff;
+   torch::jit::Module model;
+   torch::Device device = torch::kCPU;
+   std::vector<int> type_mapper;
 
-  int batch_size = -1;
+   int batch_size = -1;
 
- protected:
-  int debug_mode = 0;
+   const torch::Tensor &get_partial_forces() const { return partial_forces_tensor; }
+   const torch::Tensor &get_edge_vectors() const { return edge_vectors_tensor; }
+   const torch::Tensor &get_edge_index() const { return edge_index_tensor; }
+protected:
+   int debug_mode = 0;
 
+   torch::Tensor partial_forces_tensor;
+   torch::Tensor edge_vectors_tensor;
+   torch::Tensor edge_index_tensor;
 };
 
 }

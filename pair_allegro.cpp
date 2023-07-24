@@ -34,6 +34,9 @@
 #include <cstring>
 #include <numeric>
 #include <cassert>
+// Edit: add fstream 
+#include <fstream>
+
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -106,7 +109,11 @@ PairAllegro::PairAllegro(LAMMPS *lmp) : Pair(lmp) {
   else {
     device = torch::kCPU;
   }
-  std::cout << "Allegro is using device " << device << "\n";
+
+  // Edit: only print for rank-0
+  if (device == torch::kCPU && comm->me == 0 || device != torch::kCPU) {
+    std::cout << "Allegro is using device " << device << "\n";
+  }
 }
 
 PairAllegro::~PairAllegro(){
@@ -121,11 +128,14 @@ void PairAllegro::init_style(){
     error->all(FLERR,"Pair style Allegro requires atom IDs");
 
   // need a full neighbor list
-  int irequest = neighbor->request(this,instance_me);
-  neighbor->requests[irequest]->half = 0;
-  neighbor->requests[irequest]->full = 1;
+  //int irequest = neighbor->request(this,instance_me);
+  //neighbor->requests[irequest]->half = 0;
+  //neighbor->requests[irequest]->full = 1;
 
-  neighbor->requests[irequest]->ghost = 1;
+  //neighbor->requests[irequest]->ghost = 1;
+
+  // Edit: support last versions of Lammps
+  neighbor->add_request(this, NeighConst::REQ_FULL|NeighConst::REQ_GHOST);
 
   if (force->newton_pair == 0)
     error->all(FLERR,"Pair style Allegro requires newton pair on");
@@ -174,7 +184,10 @@ void PairAllegro::coeff(int narg, char **arg) {
     elements[i] = arg[i+1];
   }
 
-  std::cout << "Allegro: Loading model from " << arg[2] << "\n";
+  // Edit: print only on rank-0
+  if (comm->me == 0) {
+    std::cout << "Allegro: Loading model from " << arg[2] << "\n";
+  }
 
   std::unordered_map<std::string, std::string> metadata = {
     {"config", ""},
@@ -186,7 +199,33 @@ void PairAllegro::coeff(int narg, char **arg) {
     {"_jit_fusion_strategy", ""},
     {"allow_tf32", ""}
   };
-  model = torch::jit::load(std::string(arg[2]), device, metadata);
+
+  // Edit: load model on rank-0 and broadcast it to other ranks
+  //model = torch::jit::load(std::string(arg[2]), device, metadata);
+  std::vector<char> buffer;
+
+  if (comm->me == 0) {
+    std::ifstream in(std::string(arg[2]), std::fstream::binary);
+    std::istreambuf_iterator<char> it{in}, end;
+
+    buffer.assign(it, end);
+  }
+
+  int n = buffer.size();
+  MPI_Bcast(&n, 1, MPI_INT, 0, world);
+
+  buffer.resize(n);
+
+  MPI_Bcast(const_cast<char*>(buffer.data()), n, MPI_CHAR, 0, world);
+
+  //std::istrstream stream(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+  //std::istringstream stream(std::string(reinterpret_cast<const char*>(buffer.data()), buffer.size()));
+  std::istringstream stream(std::string(buffer.begin(), buffer.end()));
+
+  model = torch::jit::load(stream, device, metadata);
+
+  // ! Edit
+
   model.eval();
 
   // Check if model is a NequIP model
@@ -197,7 +236,10 @@ void PairAllegro::coeff(int narg, char **arg) {
   // If the model is not already frozen, we should freeze it:
   // This is the check used by PyTorch: https://github.com/pytorch/pytorch/blob/master/torch/csrc/jit/api/module.cpp#L476
   if (model.hasattr("training")) {
-    std::cout << "Allegro: Freezing TorchScript model...\n";
+    // Edit: print only on rank-0
+    if (comm->me == 0) {
+      std::cout << "Allegro: Freezing TorchScript model...\n";
+    }
     #ifdef DO_TORCH_FREEZE_HACK
       // Do the hack
       // Copied from the implementation of torch::jit::freeze,
@@ -270,15 +312,24 @@ void PairAllegro::coeff(int narg, char **arg) {
   std::stringstream ss;
   int n_species = std::stod(metadata["n_species"]);
   ss << metadata["type_names"];
-  std::cout << "Type mapping:" << "\n";
-  std::cout << "Allegro type | Allegro name | LAMMPS type | LAMMPS name" << "\n";
+
+  // Edit: print only on rank-0
+  if (comm->me == 0) {
+    std::cout << "Type mapping:" << "\n";
+    std::cout << "Allegro type | Allegro name | LAMMPS type | LAMMPS name" << "\n";
+  }
+
   for (int i = 0; i < n_species; i++){
     std::string ele;
     ss >> ele;
     for (int itype = 1; itype <= ntypes; itype++){
       if (ele.compare(arg[itype + 3 - 1]) == 0){
         type_mapper[itype-1] = i;
-        std::cout << i << " | " << ele << " | " << itype << " | " << arg[itype + 3 - 1] << "\n";
+
+        // Edit: print only on rank-0
+        if (comm->me == 0) {
+          std::cout << i << " | " << ele << " | " << itype << " | " << arg[itype + 3 - 1] << "\n";
+        }
       }
     }
   }
@@ -331,58 +382,21 @@ void PairAllegro::compute(int eflag, int vflag){
   // Neighbor list per atom
   int **firstneigh = list->firstneigh;
 
-
   // Total number of bonds (sum of number of neighbors)
-  int nedges = 0;
-
-  // Number of bonds per atom
-  std::vector<int> neigh_per_atom(nlocal, 0);
-
-#pragma omp parallel for reduction(+:nedges)
-  for(int ii = 0; ii < nlocal; ii++){
-    int i = ilist[ii];
-
-    int jnum = numneigh[i];
-    int *jlist = firstneigh[i];
-    for(int jj = 0; jj < jnum; jj++){
-      int j = jlist[jj];
-      j &= NEIGHMASK;
-
-      double dx = x[i][0] - x[j][0];
-      double dy = x[i][1] - x[j][1];
-      double dz = x[i][2] - x[j][2];
-
-      double rsq = dx*dx + dy*dy + dz*dz;
-      if(rsq <= cutoff*cutoff) {
-        neigh_per_atom[ii]++;
-        nedges++;
-      }
-    }
-  }
-
-  // Cumulative sum of neighbors, for knowing where to fill in the edges tensor
-  std::vector<int> cumsum_neigh_per_atom(nlocal);
-
-  for(int ii = 1; ii < nlocal; ii++){
-    cumsum_neigh_per_atom[ii] = cumsum_neigh_per_atom[ii-1] + neigh_per_atom[ii-1];
-  }
+  int nedges = std::accumulate(numneigh, numneigh+ntotal, 0);
 
   torch::Tensor pos_tensor = torch::zeros({ntotal, 3});
-  torch::Tensor edges_tensor = torch::zeros({2,nedges}, torch::TensorOptions().dtype(torch::kInt64));
   torch::Tensor ij2type_tensor = torch::zeros({ntotal}, torch::TensorOptions().dtype(torch::kInt64));
 
   auto pos = pos_tensor.accessor<float, 2>();
-  auto edges = edges_tensor.accessor<long, 2>();
   auto ij2type = ij2type_tensor.accessor<long, 1>();
 
+  long edges[2*nedges];
 
-  // Loop over atoms and neighbors,
-  // store edges and _cell_shifts
-  // ii follows the order of the neighbor lists,
-  // i follows the order of x, f, etc.
-  if (debug_mode) printf("Allegro edges: i j rij\n");
-#pragma omp parallel for
-  for(int ii = 0; ii < ntotal; ii++){
+
+  int edge_counter = 0;
+  
+  for (int ii = 0; ii < ntotal; ii++){
     int i = ilist[ii];
     int itag = tag[i];
     int itype = type[i];
@@ -393,13 +407,19 @@ void PairAllegro::compute(int eflag, int vflag){
     pos[i][1] = x[i][1];
     pos[i][2] = x[i][2];
 
-    if(ii >= nlocal){continue;}
+    // reset forces to zero
+    f[i][0] = 0;
+    f[i][1] = 0;
+    f[i][2] = 0;
+
+    if(ii >= nlocal){
+      continue;
+    }
 
     int jnum = numneigh[i];
     int *jlist = firstneigh[i];
 
-    int edge_counter = cumsum_neigh_per_atom[ii];
-    for(int jj = 0; jj < jnum; jj++){
+    for(int jj = 0; jj < jnum; jj++) {
       int j = jlist[jj];
       j &= NEIGHMASK;
       int jtag = tag[j];
@@ -410,18 +430,24 @@ void PairAllegro::compute(int eflag, int vflag){
       double dz = x[i][2] - x[j][2];
 
       double rsq = dx*dx + dy*dy + dz*dz;
-      if(rsq > cutoff*cutoff) {continue;}
+      if(rsq < cutoff*cutoff) {
+        edges[edge_counter*2] = i;
+        edges[edge_counter*2+1] = j;
 
-      // TODO: double check order
-      edges[0][edge_counter] = i;
-      edges[1][edge_counter] = j;
-
-      edge_counter++;
-
-      if (debug_mode) printf("%d %d %.10g\n", itag-1, jtag-1, sqrt(rsq));
+        edge_counter++;
+      }
     }
   }
-  if (debug_mode) printf("end Allegro edges\n");
+
+  // fill in edge tensor
+  torch::Tensor edges_tensor = torch::zeros({2,edge_counter}, torch::TensorOptions().dtype(torch::kInt64));
+  auto new_edges = edges_tensor.accessor<long, 2>();
+  
+  for (int i=0; i<edge_counter; i++) {
+      long *e=&edges[i*2];
+      new_edges[0][i] = e[0];
+      new_edges[1][i] = e[1];
+  }
 
   c10::Dict<std::string, torch::Tensor> input;
   input.insert("pos", pos_tensor.to(device));
@@ -438,23 +464,54 @@ void PairAllegro::compute(int eflag, int vflag){
 
   torch::Tensor atomic_energy_tensor = output.at("atomic_energy").toTensor().cpu();
   auto atomic_energies = atomic_energy_tensor.accessor<float, 2>();
-  float atomic_energy_sum = atomic_energy_tensor.sum().data_ptr<float>()[0];
+  // float atomic_energy_sum = atomic_energy_tensor.sum().data_ptr<float>()[0];
 
-  //std::cout << "atomic energy sum: " << atomic_energy_sum << std::endl;
-  //std::cout << "Total energy: " << total_energy_tensor << "\n";
-  //std::cout << "atomic energy shape: " << atomic_energy_tensor.sizes()[0] << "," << atomic_energy_tensor.sizes()[1] << std::endl;
-  //std::cout << "atomic energies: " << atomic_energy_tensor << std::endl;
+  // Edit: collect partial forces and edges for heat flux calculation
+  // use partial forces for the forces & virial
+  partial_forces_tensor = output.at("partial_forces").toTensor().cpu();
+  edge_vectors_tensor = output.at("edge_vectors").toTensor().cpu();
+  edge_index_tensor = output.at("edge_index").toTensor().cpu();
 
-  // Write forces and per-atom energies (0-based tags here)
-  eng_vdwl = 0.0;
-#pragma omp parallel for reduction(+:eng_vdwl)
-  for(int ii = 0; ii < ntotal; ii++){
-    int i = ilist[ii];
+  auto edge_index = edge_index_tensor.accessor<long,2>();
+  auto edge_vectors = edge_vectors_tensor.accessor<float,2>();
+  auto partial_forces = partial_forces_tensor.accessor<float,2>();
 
-    f[i][0] = forces[i][0];
-    f[i][1] = forces[i][1];
-    f[i][2] = forces[i][2];
-    if (eflag_atom && ii < inum) eatom[i] = atomic_energies[i][0];
-    if(ii < inum) eng_vdwl += atomic_energies[i][0];
+  for (int idx=0; idx<edge_counter; idx++) {
+    int i = edge_index[0][idx];
+    int j = edge_index[1][idx];
+
+    double fij[3], rij[3];
+
+    fij[0] = partial_forces[idx][0];
+    fij[1] = partial_forces[idx][1];
+    fij[2] = partial_forces[idx][2];
+
+    rij[0] = edge_vectors[idx][0];
+    rij[1] = edge_vectors[idx][1];
+    rij[2] = edge_vectors[idx][2];
+
+    f[i][0] += fij[0];
+    f[i][1] += fij[1];
+    f[i][2] += fij[2];
+
+    f[j][0] -= fij[0];
+    f[j][1] -= fij[1];
+    f[j][2] -= fij[2];
+    
+    if (vflag) {
+      // tally per-atom virial contribution
+      // here "j" corresponds to local atom but it shouldn't make a difference (at least on total virial)
+      ev_tally_xyz(i, j, nlocal, newton_pair, 0.0, 0.0, fij[0], fij[1], fij[2], -rij[0], -rij[1], -rij[2]);
+    }
   }
+
+  if (eflag) {
+    for (int ii = 0; ii < inum; ii++) {
+        int i = ilist[ii];
+        ev_tally_full(i, 2.0 * atomic_energies[i][0], 0, 0, 0, 0, 0);
+    }
+  }
+
+  if (vflag_fdotr)
+    virial_fdotr_compute();
 }
