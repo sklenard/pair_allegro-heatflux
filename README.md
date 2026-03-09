@@ -1,8 +1,8 @@
 # `pair_allegro-heatflux`
 
-This pair style allows you to use Allegro models from the [`allegro`](https://github.com/mir-group/allegro) package in LAMMPS simulations. This implementation of `pair_allegro` includes heatflux and stress tensor calculation but requires that the mode computes partial forces. Therefore the allegro model should be deployed using https://github.com/sklenard/allegro-heatflux.
+This pair style allows you to use Allegro models from the [`allegro`](https://github.com/mir-group/allegro) package in LAMMPS simulations. This implementation of `pair_allegro` includes heatflux and stress tensor calculation but requires that the model computes edge forces. Therefore the allegro model should be deployed using https://github.com/sklenard/allegro-heatflux.
 
-**Important note:** The current implementation may not include new features and/or bugfix from the original implementation (https://github.com/mir-group/pair_allegro)! In addition only the *standard* pair potential supports heatflux and virial calculations. They will be implemented in the kokkos pair potential in the future.
+**Important note:** The current implementation may not include new features and/or bugfixes from the original implementation (https://github.com/mir-group/pair_allegro)! In particular, it is not compatible with the breaking changes introduced in recent versions of `nequip`. Only the *standard* pair potential supports heatflux and virial calculations; the Kokkos pair potential is not supported and will not be implemented. For models trained in float64 precision, the code must be modified accordingly (see the source files).
 
 ## Usage in LAMMPS
 
