@@ -18,3 +18,24 @@ The given names must be consistent with the names specified in the Allegro train
 ## Building LAMMPS with this pair style
 
 Please follow the instructions provided in the [pair_allegro README](https://github.com/mir-group/pair_allegro#building-lammps-with-this-pair-style).
+
+## Citation
+
+If you use this package, please cite:
+
+```bibtex
+@article{lee-gk-2024,
+  title = {Equivariant graph neural network interatomic potential for Green-Kubo thermal conductivity in phase change materials},
+  author = {Lee, Sung-Ho and Li, Jing and Olevano, Valerio and Skl\'enard, Benoit},
+  journal = {Phys. Rev. Mater.},
+  volume = {8},
+  issue = {3},
+  pages = {033802},
+  numpages = {10},
+  year = {2024},
+  month = {Mar},
+  publisher = {American Physical Society},
+  doi = {10.1103/PhysRevMaterials.8.033802},
+  url = {https://link.aps.org/doi/10.1103/PhysRevMaterials.8.033802}
+}
+```
